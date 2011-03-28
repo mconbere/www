@@ -1,78 +1,137 @@
 ///
-/// Chapter 2: Networking
-/// =====================
+/// Chapter 3: "Parsing" HTML
+/// =========================
 ///
-/// In this chapter we will begin to investigate what it will take to write the networking code that
-/// will implement HTTP 1.1 in as little code as possible.
+/// In this chapter we will create a fully armed and operational web browser, though it will be
+/// missing some very important features.
 ///
-/// HTTP/1.1
-/// --------
+/// HTML5
+/// -----
 ///
-/// Just what is the HTTP/1.1 thing anyway? HTTP is a fairly simple networking protocol. We will be
-/// simplifying it even further as we shrink the code complexity down to as simple as possible. At
-/// its most basic, HTTP has a request format and a response format. Here is what they look like:
+/// This web browser will be a fully functional HTML5 client. I do not mean we will achieve 100% on the
+/// acid 3 test in 128 lines of code, but rather we will embrace the idea that HTML is a fluid language
+/// that should gracefully degrade on less featureful clients. Our support of HTML will put this to the
+/// test.
 ///
-/// ### HTTP Request
-///     GET /index.html HTTP/1.1
-///     Host: www.google.com
+/// The plan is as follows:
 ///
-/// ### HTTP Response
-///     HTTP/1.1 200 OK
-///     Content-length: 331
-///     
-///     <html>...</html>
+/// * Get the full HTML text (by stripping out the HTTP headers that we looked at in the previous chapter.
 ///
-/// As you can see, there isn't that much to it. This is ignore a lot of the special case scenarios you
-/// may encounter, like url redirects, but those will come in time. The important things to note are that
-/// the messages are simple. All lines end in Windows-style line endings (`CRLF` or `\r\n`). The end of the
-/// message is indicated by two end-of-line markers in a row (`CRLFCRLF` or `\r\n\r\n`). If we can send and
-/// receive these messages, we should be most of the way there.
+/// * All valid HTML documents that we display should have the following form:
+///       <html>
+///           ...
+///           <body>
+///               [The stuff we care about]
+///           </body>
+///       </html>
+///   Thus, by looking for the `<body>` and `</body>` tags, we should be able to find all of the content we
+///   need.
+///
+/// * Once we have the code inside the body, we will do a very minimal formatting job:
+///   * For every `<a href="">` tag we encounter, we will will make a note of the URL in the `href`, and add
+///     a corresponding number to the outputted text. The user will be able to use this number to follow the
+///     link. How quaint!
+///   * For every `<br>` tag we encounter, we will add a newline to make the text a little prettier.
 ///
 /// Includes
 /// --------
 ///
-/// Here are the headers that we used in Chapter 1:
+/// Here are the headers we have used up to now. We will not add anything more in this chapter, instead
+/// relying on the tools we already have available to us.
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-
-/// In addition to string handling and I/O, we are going to use the standard networking headers as well as
-/// regular expression support to perform some more complicated processing:
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <regex.h>
 
-///
-/// Communicating with a Server
-/// ---------------------------
-///
-/// Define a simple macro to handle defining a static regex. This will be used a number of times over,
-/// so defining it here will save some space. The macro makes use of the single field that is required to be
-/// defined inside of a `regex_t` structure, `.re_nsub`. By setting it to -1 in the static initialization,
-/// we can check for it equally -1 later to only run our compilation code once. In a more complicated
-/// environment with threading we would need to be more careful, but this should be fine for our simple
-/// example.
+/// Keep the useful macros up at the top:
 #define REGEX(name, string) \
     static regex_t name = { .re_nsub=-1 }; \
     if (name.re_nsub == -1) regcomp(&name, string, REG_EXTENDED | REG_ICASE); 
-
-/// Define the maximum size of a response from a server. Setting this to be a fixed constant will simplify the code,
-/// but make it less flexible. A more flexible solution might use realloc to adjust the size of the response buffer.
 #define MAX_RESPONSE_SIZE (1<<17)
 
-/// Our new function, `navigate_to_url()`, defines what should be done with a new URL. For now, it will
-/// use a regular expression to parse the URL, open a socket with the results, and send and receive a very
-/// simple HTTP message.
-void navigate_to_url(char *url) {
-    REGEX(url_regex, "(http://)?([^/:]+)(:([0-9]+))?(/(.*))?");
+///
+/// Handling specific HTTP responses
+/// --------------------------------
+///
+/// An HTTP response can take a couple forms. It can be successful (codes 2XX), a redirection (codes 3XX),
+/// or an error (codes 4XX for client errors, code 5XX for server errors). Each of these individual functions
+/// will handle these scenarios. The next section will cover how the information for each of these functions
+/// is parsed from the response.
+void handle_http_success(int code, char *header, char *message) {
+    // Assuming that we have HTML, go handle the HTML!
+    printf("Success: %d\n\n%s\n\n%s\n", code, header, message);
+}
+
+void handle_http_redirect(int code, char *header, char *message) {
+    // look for the line "Location: new-url\r\n" in the header
+    printf("Redirect: %d\n\n%s\n\n%s\n", code, header, message);
+}
+
+void handle_http_error(int code, char *error, char *header, char *message) {
+    printf("Error: %d (%s)\n\n%s\n\n%s\n", code, error, header, message);
+}
+
+///
+/// Handling the HTTP response
+/// --------------------------
+///
+/// This method will handle all HTTP responses. For now, we will expect the response to be a 200 OK,
+/// but in the future we will need to handle other response types to allow for a more robust web
+/// browser.
+void handle_http_response(char *response) {
+    REGEX(http_response_regex, "(.*)\r?\n\r?\n(.*)");
     regmatch_t matches[32];
-    if (regexec(&url_regex, url, url_regex.re_nsub + 1, matches, 0) == 0) { // the third argument of regexec takes the number of submatches, not the total number of matches.
+    if (regexec(&http_response_regex, response, http_response_regex.re_nsub + 1, matches, 0) == 0) {
+        char *header = NULL;
+        if (matches[1].rm_so != -1) {
+            header = response + matches[1].rm_so;
+            response[matches[1].rm_eo] = '\0';
+        }
+        char *message = "";
+        if (matches[2].rm_so != -1) {
+            message = response + matches[2].rm_so;
+            response[matches[2].rm_eo] = '\0';
+        }
+        
+        printf("header: %s\n\nmessage: %s\n", header, message);
+
+        REGEX(http_response_status_line_regex, "[^\\s]+ ([\\d]+) (.*)\r?\n");
+        if (regexec(&http_response_status_line_regex, header, http_response_status_line_regex.re_nsub + 1, matches, 0) == 0) {
+            int code = 0;
+            if (matches[1].rm_so != -1) {
+                code = atoi(header + matches[1].rm_so);
+            }
+            char *error = "";
+            if (matches[2].rm_so != -1) {
+                error = response + matches[2].rm_so;
+                header[matches[2].rm_eo] = '\0';
+                header = header + matches[2].rm_eo + 1;
+            }
+
+            if (code >= 200 && code < 300) {
+                handle_http_success(code, header, message);
+            } else if (code < 400) {
+                handle_http_redirect(code, header, message);
+            } else if (code < 600) {
+                handle_http_error(code, error, header, message);
+            }
+        }
+    }
+}
+
+/// And finally, here is our original code, modified to call our html parsing code
+void navigate_to_url(char *url) {
+    REGEX(url_regex, "(http://)?([^/:[:space:]]+)(:([0-9]+))?(/([^[:space:]]*))?");
+    regmatch_t matches[32];
+    if (regexec(&url_regex, url, url_regex.re_nsub + 1, matches, 0) == 0) {
         // 2 is host, 4 is port, 6 is path without the initial slash
         char *host = "";
-        if (matches[2].rm_so != -1) { // a match succeeded if it is not -1
-            host = url + matches[2].rm_so; // a match begins at `.rm_so`,
-            url[matches[2].rm_eo] = '\0';  // and should be terminated at `.rm_eo`. I have constructed the regex to ensure that the next character is never important.
+        if (matches[2].rm_so != -1) {
+            host = url + matches[2].rm_so;
+            url[matches[2].rm_eo] = '\0';
         }
         char *port = "80";
         if (matches[4].rm_so != -1) {
@@ -92,7 +151,7 @@ void navigate_to_url(char *url) {
             if (sock > -1) {
                 if (connect(sock, serv->ai_addr, serv->ai_addrlen) > -1) {
                     // send a message to the remote server
-                    char *message; asprintf(&message, "GET /%s HTTP/1.1\r\nHost: %s\r\n\r\n", path, host);
+                    char *message; asprintf(&message, "GET /%s HTTP/1.0\r\nHost: %s\r\n\r\n", path, host);
                     send(sock, message, strlen(message), 0);
                     free(message);
 
@@ -104,7 +163,7 @@ void navigate_to_url(char *url) {
                         received += bytes_received;
                     }
                     *received = '\0';
-                    printf("Response from %s:%s (/%s):\n%s\n", host, port, path, response);
+                    handle_http_response(response);
                     free(response);
                 }
             }
@@ -112,30 +171,6 @@ void navigate_to_url(char *url) {
     }
 }
 
-/// Here is what this function is doing:
-///
-/// * First, a regular expression is defined to parse URLs. It is a very permissive regular expression, but should get
-///   the job done. Here is the breakdown of what is in the regex:
-///   * `(http://)?`: Optionally allow the string to begin with `http://`.
-///   * `([^/:]+)`: Define the hostname of the URL to be anything after the `http://` that does contain a colon or a slash.
-///   * `(:([0-9]+))?`: Optionally grab a port number, and place just the number portion without the colon in a group.
-///   * `(/(.*))?`: Optionally grab a path following the hostname and port. Notice that the beginning slash is not part of
-///     the definition.
-///   This regex places the matches into groups. Hostname is group 2, port is group 4, and the path is group 6.
-///
-/// * Next, pull the strings out of the matches, null terminating along the way. We use the fact that the beginning slash is
-///   not part of the path name to allow us to have a null terminator between the host/port and path.
-///
-/// * Once we have the full request information parsed, we construct a socket, connect to the server, and send a simple request
-///   in the form of an HTTP GET.
-///
-/// * We then wait for a response, pulling the response in pieces into a larger response buffer. Again, we make sure we NULL
-///   terminate everything.
-///
-/// This leaves us well prepared for our next chapter, where we will parse the response data with a new set of regular
-/// expressions to derive a very minimal ASCII representation of the page.
-///
-/// And finally, here is the original main function modified to use our new function when a URL is given as input:
 int main(int argc, char **argv) {
     while (1) {
         printf("? ");
